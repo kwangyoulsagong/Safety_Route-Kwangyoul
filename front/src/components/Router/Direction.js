@@ -8,6 +8,7 @@ import { decode } from '@mapbox/polyline';
 import routeImage from "../img/route.svg";
 import homeImage from "../img/home.svg";
 import cctvImage from "../img/cctv.svg";
+const Nominatim_Base_Url = 'https://nominatim.openstreetmap.org/search';
 
 function Direction() {
   const [address, setAddress] = useState("");
@@ -17,17 +18,14 @@ function Direction() {
   const [filteredCCTVData, setFilteredCCTVData] = useState([]);
   const [routeCoordinates, setRouteCoordinates] = useState([]);
   const [cctvCircles, setCCTVCircles] = useState([]);
+  const [osrmPolyline, setOsrmPolyline] = useState('');
+  const [startLocationQuery, setStartLocationQuery] = useState('');
+  const [endLocationQuery, setEndLocationQuery] = useState('');
+  const [startLocation, setStartLocation] = useState(null);
+  const [endLocation, setEndLocation] = useState(null);
+  const [osrmPolylines, setOsrmPolylines] = useState([]);
 
   useEffect(() => {
-    //axios로 백엔드 cctv 가져왔습니다
-    axios.get('http://localhost:3001/cctv') // 백엔드 cctv 경로
-      .then((response) => {
-        const cctvData = response.data;
-        setCCTVData(cctvData);
-      })
-      .catch((error) => {
-        console.error("Error fetching CCTV data:", error);
-      });
 
     //현재 재위치 일단 서울시청으로 박아둠
     navigator.geolocation.getCurrentPosition(
@@ -40,19 +38,6 @@ function Direction() {
     );
   }, []);
 
-  const radius = 1200; //반지름 반경을 1000으로
-
-  useEffect(() => {
-    //cctv 위치
-    if (userLocation) {
-      const filteredMarkers = cctvData.filter((cctv) => {
-        const cctvCoords = [parseFloat(cctv["WGS84위도"]), parseFloat(cctv["WGS84경도"])];
-        const distance = L.latLng(userLocation).distanceTo(cctvCoords);
-        return distance <= radius;
-      });
-      setFilteredCCTVData(filteredMarkers);
-    }
-  }, [userLocation, cctvData, radius]);
 
   const customIcon = new L.Icon({
     iconUrl: require("../img/search.png"),
@@ -68,70 +53,84 @@ function Direction() {
 
   const mapRef = useRef();
 
-  useEffect(() => {
-    async function fetchRouteData() {
-      try {
-        const response = await axios.get('http://127.0.0.1:5000/route/v1/foot/126.9780,37.5665;126.9829812177374,37.569374723904296?alternatives=3&steps=true');
-        if (response.data && response.data.routes && response.data.routes.length > 0) {
-          const routeData = response.data.routes.slice(0, 3); // Get the first 3 alternative routes
-          const coordinates = routeData.map(route => decodePolyline(route.geometry));
-          setRouteCoordinates(coordinates);
+  async function fetchRouteData() {
+    try {
+        const requestData = {
+           
+        };
+
+        const response = await axios.post(
+            'http://localhost:8080/Safety_route/walking',
+            requestData,
+            {
+                headers: {
+                    'Content-Type': 'application/json', // Set the content type
+                },
+            }
+        );
+
+        if (response.data && response.data.code === 1) {
+            const data = JSON.parse(response.data.data);
+            if (data.routes && data.routes.length > 0) {
+                const osrmPolyline = data.routes[0].geometry;
+                return osrmPolyline;
+            } else {
+                console.error('No valid route data found.');
+                return null;
+            }
         } else {
-          console.error('No valid route data found.');
+            console.error('No valid route data found.');
+            return null;
         }
-      } catch (error) {
+    } catch (error) {
         console.error('Error fetching route data:', error);
+        return null;
+    }
+}
+const fetchLocationCoordinates = async (query) => {
+  try {
+    const response = await axios.get(Nominatim_Base_Url, {
+      params: {
+        q: query,
+        format: 'json',
+      },
+    });
+
+    if (response.data && response.data.length > 0) {
+      const location = response.data[0];
+      return { lat: parseFloat(location.lat), lon: parseFloat(location.lon) };
+    } else {
+      console.error('No location data found for the query.');
+      return null;
+    }
+  } catch (error) {
+    console.error('Error fetching location data:', error);
+    return null;
+  }
+};
+  
+  useEffect(() => {
+    async function fetchData() {
+      const osrmPolyline = await fetchRouteData();
+      console.log('osrmPolyline:', osrmPolyline); // 로깅
+      if (osrmPolyline && osrmPolyline.length > 0) {
+        const decodedCoordinates = decode(osrmPolyline, { precision: 5 });
+        setRouteCoordinates(decodedCoordinates); // Set the decoded coordinates
+      } else {
+        console.error('Invalid osrmPolyline data');
       }
     }
 
-    fetchRouteData();
+    fetchData();
   }, []);
-
-  //decode
-  function decodePolyline(encoded) {
-    const decoded = decode(encoded, { precision: 5 });
-    return decoded.map(coord => ({ lat: coord[0], lng: coord[1] }));
-  }
-
-  const calculateBoundingBox = (routeCoordinates) => {
-    const bounds = L.latLngBounds();
-    routeCoordinates.forEach((coord) => {
-      bounds.extend(coord);
-    });
-    return bounds;
-  };
-
-  // Function to filter CCTV markers within the bounding box
-  const filterCCTVsInBoundingBox = (cctvData, boundingBox) => {
-    return cctvData.filter((cctv) => {
-      const cctvCoords = [parseFloat(cctv['WGS84위도']), parseFloat(cctv['WGS84경도'])];
-      return boundingBox.contains(L.latLng(cctvCoords));
-    });
-  };
+  const decodedCoordinates = decode(osrmPolyline, { precision: 5 });
   
-  // Calculate the bounding box for the route
-  const routeBoundingBox = calculateBoundingBox(routeCoordinates);
+  
+  
 
-  // Filter CCTV markers within the bounding box
-  const nearbyCCTVs = filterCCTVsInBoundingBox(cctvData, routeBoundingBox);
 
-  // Calculate circles for nearby CCTV markers
-  useEffect(() => {
-    const circles = nearbyCCTVs.map((cctv, index) => {
-      const cctvCoords = [parseFloat(cctv['WGS84위도']), parseFloat(cctv['WGS84경도'])];
-      return (
-        <Circle
-          key={index}
-          center={cctvCoords}
-          radius={20} // Set the desired radius of the circle
-          fillColor="red" // Set the fill color of the circle
-          fillOpacity={0.5} // Set the fill opacity of the circle
-        />
-      );
-    });
 
-    setCCTVCircles(circles);
-  }, [nearbyCCTVs]);
+ 
 
   return (
     <div className='main'>
@@ -145,40 +144,12 @@ function Direction() {
             A pretty CSS3 popup. <br /> Easily customizable.
           </Popup>
         </Marker>
-        
-        {routeCoordinates.map((coordinates, routeIndex) => (
-          <Polyline key={routeIndex} positions={coordinates} color='#258fff' />
-        ))}
+        {osrmPolylines.map((osrmPolyline, index) => (
+  <Polyline key={index} positions={decode(osrmPolyline, { precision: 5 })} color='#258fff' />
+))}
+    
 
-        {nearbyCCTVs.map((cctv, index) => (
-          <Marker key={index} position={[parseFloat(cctv['WGS84위도']), parseFloat(cctv['WGS84경도'])]} icon={cctvIcon}>
-            <Popup>
-              관리기관명: {cctv['관리기관명']}<br />
-              소재지도로명주소: {cctv['소재지도로명주소']}<br />
-              설치목적구분: {cctv['설치목적구분']}<br />
-              카메라대수: {cctv['카메라대수']}<br />
-              설치연월: {cctv['설치연월']}<br />
-              관리기관전화번호: {cctv['관리기관전화번호']}<br />
-              데이터기준일자: {cctv['데이터기준일자']}<br />
-            </Popup>
-          </Marker>
-        ))}
-
-        {filteredCCTVData.map((cctv, index) => (
-          <Marker key={index} position={[parseFloat(cctv['WGS84위도']), parseFloat(cctv['WGS84경도'])]} icon={cctvIcon}>
-            <Popup>
-              관리기관명: {cctv['관리기관명']}<br />
-              소재지도로명주소: {cctv['소재지도로명주소']}<br />
-              설치목적구분: {cctv['설치목적구분']}<br />
-              카메라대수: {cctv['카메라대수']}<br />
-              설치연월: {cctv['설치연월']}<br />
-              관리기관전화번호: {cctv['관리기관전화번호']}<br />
-              데이터기준일자: {cctv['데이터기준일자']}<br />
-            </Popup>
-          </Marker>
-        ))}
-
-        {cctvCircles} {/* Render the circles */}
+    {cctvCircles}  {/* Render the circles */}
       </MapContainer>
       <div className='menu-bar'>
         <Link className='logo'>로고</Link>
@@ -199,15 +170,92 @@ function Direction() {
         <div className='nav'>
           <div className='direction-tab'>도보경로</div>
           <div className='direction-tab'>안심경로</div>
-          <input className='start'
+          <input
+            className='start'
             type='text'
             placeholder='출발지'
+            value={startLocationQuery}
+            onChange={(e) => setStartLocationQuery(e.target.value)}
           />
-          <input className='end'
+          <input
+            className='end'
             type='text'
             placeholder='도착지'
+            value={endLocationQuery}
+            onChange={(e) => setEndLocationQuery(e.target.value)}
           />
-          <button className='route-button' >경로 검색</button>
+         <button
+className="route-button"
+onClick={async () => {
+  try {
+    const startLocationCoords = await fetchLocationCoordinates(startLocationQuery);
+    const endLocationCoords = await fetchLocationCoordinates(endLocationQuery);
+
+    if (startLocationCoords && endLocationCoords) {
+      const response = await axios.get(
+        'http://127.0.0.1:5001/find_safe_route',
+        {
+          params: {
+            depart_x: startLocationCoords.lon,
+            depart_y: startLocationCoords.lat,
+            arrive_x: endLocationCoords.lon,
+            arrive_y: endLocationCoords.lat,
+          },
+        }
+      );
+
+      if (response.data && response.data.OSRM_response && response.data.OSRM_response.routes) {
+        const routes = response.data.OSRM_response.routes;
+        console.log(response.data)
+        
+        if (routes.length > 0) {
+          const polylines = routes.map(route => route.geometry);
+          setOsrmPolylines(polylines);
+          if (response.data.near_cctv && Array.isArray(response.data.near_cctv)) {
+            console.log('Received CCTV Data:', response.data.near_cctv);
+            // Now, you can set the CCTV data to state
+            setCCTVData(response.data.near_cctv);
+            const cctvCircles = response.data.near_cctv
+            .map((cctv, index) => {
+              if (cctv.length >= 13) {
+                const latitude = cctv[index][11]; // Access the 12th element of the inner array for latitude
+                const longitude = cctv[index][12]; // Access the 13th element of the inner array for longitude
+      
+                const cctvLocation = [parseFloat(latitude), parseFloat(longitude)]; // Convert to floating-point numbers
+      
+                return (
+                  <Circle center={cctvLocation} radius={50} color="red" key={index}>
+                    <Popup>
+                      Latitude: {latitude} <br />
+                      Longitude: {longitude}
+                    </Popup>
+                  </Circle>
+                );
+              } else {
+                return null;
+              }
+            });
+      
+          // Now, set the cctvCircles to state
+          setCCTVCircles(cctvCircles);
+          }
+        } else {
+          console.error('No routes found.');
+        }
+      } else {
+        console.error('No valid route data found.');
+      }
+    }
+  } catch (error) {
+    console.error('Error fetching route data:', error);
+  }
+  
+}}
+>
+경로 검색
+</button>
+
+
         </div>
       </div>
     </div>
